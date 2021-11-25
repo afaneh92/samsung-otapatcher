@@ -1,0 +1,320 @@
+#!/bin/bash
+# By Mohammad Afaneh, afaneh92 @ XDA Developers.
+#
+# OTA-PATCHER v0.1
+
+# Variables
+DIR=`readlink -f .`;
+
+# Color
+ON_BLUE=`echo -e "\033[44m"`	# On Blue
+RED=`echo -e "\033[1;31m"`	# Red
+BLUE=`echo -e "\033[1;34m"`	# Blue
+GREEN=`echo -e "\033[1;32m"`	# Green
+UNDER_LINE=`echo -e "\e[4m"`	# Text Under Line
+STD=`echo -e "\033[0m"`		# Text Clear
+ 
+# Functions
+pause(){
+  read -p "${RED}$2${STD}Press ${BLUE}[Enter]${STD} key to $1..." fackEnterKey
+}
+
+choose_ota_file(){
+  local find_ota_file=""
+  find_ota_file=($(ls *.zip *.bin 2>/dev/null))
+  declare -i i=1
+  shift 2
+  for e in "${find_ota_file[@]}"; do
+    echo "$i) $e"
+    i=i+1
+  done
+  echo ""
+  local file=""
+  read -p "Select: " file
+  if [[ $file -gt 0 && $file -le ${#find_ota_file[@]} ]]; then
+    export ota_file="${find_ota_file[$file-1]}"
+  else
+    pause 'return to Main menu' 'Invalid option, '
+    $DIR/menu
+  fi
+}
+
+patch_partition(){
+  check_patch_file=`unzip -p $DIR/$ota_file META-INF/com/google/android/updater-script | egrep -B 2 "$1.p"`
+  init_sha1=`echo $check_patch_file | cut -d ':' -f4 | cut -d '"' -f1`
+  target_size=`echo $check_patch_file | cut -d ':' -f6`
+  target_sha1=`echo $check_patch_file | cut -d ':' -f7 | cut -d '"' -f1`
+  if $DIR/bin/ApplyPatch $1 - $init_sha1 $target_size $target_sha1 $1.p; then
+    echo "${GREEN} - Patched $1 ${STD}";
+  else
+    echo "${RED} - Failed to apply patch to $1 ${STD}";
+  fi
+  rm -rf $1.p
+  pause 'continue'
+}
+
+simg_2_img(){
+  for i in $@; do
+    if [[ -f $i ]]; then
+      echo "Extract sparse $i to raw image"
+      $DIR/bin/simg2img $1 $i-2 2>/dev/null
+      if [[ ! -s $i-2 ]]; then
+        rm -rf $i-2
+      else
+        mv $i-2 $i
+      fi
+    fi
+  done
+}
+
+lpunpack_super(){
+  if [[ -f super.img ]]; then
+    simg_2_img super.img
+    echo "Extracting partition images from super"
+    if $DIR/bin/lpunpack super.img; then
+      echo "${GREEN} - Extracted super.img ${STD}";
+    else
+      echo "${RED} - Failed to extract super.img ${STD}";
+    fi
+    pause 'continue'
+  fi
+}
+
+lpmake_super(){
+  if [[ -f system.img ]] && [[ -f vendor.img ]] && [[ -f product.img ]] && [[ -f odm.img ]]; then
+    echo "Generating a super partition image"
+    super_size=`stat -c '%s' super.img`
+    system_size=`stat -c '%s' system.img`
+    vendor_size=`stat -c '%s' vendor.img`
+    product_size=`stat -c '%s' product.img`
+    odm_size=`stat -c '%s' odm.img`
+    main_size=$((${system_size} + ${vendor_size} + ${product_size} + ${odm_size}))
+    if $DIR/bin/lpmake --metadata-size 65536 --super-name super --metadata-slots 1 --device super:$super_size --group main:$main_size --partition system:readonly:$system_size:main --image system=./system.img --partition vendor:readonly:$vendor_size:main --image vendor=./vendor.img --partition product:readonly:$product_size:main --image product=./product.img --partition odm:readonly:$odm_size:main --image odm=./odm.img --sparse --output ./super_new.img; then
+      echo "${GREEN} - Generated super.img ${STD}";
+      rm -rf super.img system.img vendor.img product.img odm.img
+      mv super_new.img super.img
+    else
+      echo "${RED} - Failed to generate super.img ${STD}";
+    fi
+    pause 'continue'
+  fi
+}
+
+block_image_update(){
+  for i in $@; do
+    j=${i%.*}
+    if $DIR/bin/BlockImageUpdate $i $j.transfer.list $j.new.dat $j.patch.dat; then
+      echo "${GREEN} - Patched $i ${STD}";
+    else
+      echo "${RED} - Failed to update $i ${STD}";
+    fi
+    rm -rf $j.transfer.list $j.new.dat $j.patch.dat Progress.txt
+    pause 'continue'
+  done
+}
+
+ap_file(){
+  source_ap_file=`unzip -p $ota_file build_info.txt | grep source_ap_file | cut -d'=' -f 2`
+  target_ap_file=`unzip -p $ota_file build_info.txt | grep target_ap_file | cut -d'=' -f 2`
+  if [[ ! -f $source_ap_file ]]; then
+    pause 'exit' "$source_ap_file not found!, "
+    exit 1
+  else
+    echo "Extracting $source_ap_file to tmp/"
+    mkdir -p tmp/${source_ap_file%%.*}
+    tar -xf "$source_ap_file" -C tmp/${source_ap_file%%.*}
+    cd tmp/${source_ap_file%%.*} && findlz4=`ls *.lz4 2>/dev/null`
+    [[ ! -z "$findlz4" ]] && decompresslz4 $findlz4 && cd ../../
+    mkdir -p tmp/${target_ap_file%%.*}
+    echo "Copying tmp/${source_ap_file%%.*}/* to tmp/${target_ap_file%%.*}/"
+    cp -rf tmp/${source_ap_file%%.*}/* tmp/${target_ap_file%%.*}/
+    findlist=`ls -1 tmp/${source_ap_file%%.*}/ | grep -v / 2>/dev/null`
+    unzip -o "$ota_file" $findlist -d "tmp/${target_ap_file%%.*}"
+    unzip -j "$ota_file" boot.img.p -d "tmp/${target_ap_file%%.*}"
+    cd tmp/${target_ap_file%%.*} && patch_partition boot.img && cd ../../
+    cd tmp/${target_ap_file%%.*} && lpunpack_super && cd ../../
+    ap_block_image_list="system.img vendor.img product.img odm.img"
+    ap_block_image_extract_list="system.new.dat system.patch.dat system.transfer.list vendor.new.dat vendor.patch.dat vendor.transfer.list product.new.dat product.patch.dat product.transfer.list odm.new.dat odm.patch.dat odm.transfer.list"
+    unzip -j "$ota_file" $ap_block_image_extract_list -d "tmp/${target_ap_file%%.*}"
+    cd tmp/${target_ap_file%%.*} && block_image_update $ap_block_image_list && cd ../../
+    cd tmp/${target_ap_file%%.*} && lpmake_super && cd ../../
+    [ ! -d "out" ] && mkdir out
+    echo "Compressing tmp/${target_ap_file%%.*} to out/${target_ap_file%.*}"
+    cd tmp/${target_ap_file%%.*} && compresslz4 $findlz4 && tar -H ustar -c `ls 2>/dev/null` > ../../out/${target_ap_file%.*} && cd ../../
+    echo "Generate md5 hash"
+    cd out && md5sum -t ${target_ap_file%.*} >> ${target_ap_file%.*} && mv ${target_ap_file%.*} $target_ap_file && cd ..
+  fi
+}
+
+bl_file(){
+  source_bl_file=`unzip -p $ota_file build_info.txt | grep source_bl_file | cut -d'=' -f 2`
+  target_bl_file=`unzip -p $ota_file build_info.txt | grep target_bl_file | cut -d'=' -f 2`
+  if [[ ! -f $source_bl_file ]]; then
+    pause 'exit' "$source_bl_file not found!, "
+    exit 1
+  else
+    echo "Extracting $source_bl_file to tmp/"
+    mkdir -p tmp/${source_bl_file%%.*}
+    tar -xf "$source_bl_file" -C tmp/${source_bl_file%%.*}
+    cd tmp/${source_bl_file%%.*} && findlz4=`ls *.lz4 2>/dev/null`
+    [[ ! -z "$findlz4" ]] && decompresslz4 $findlz4 && cd ../../
+    mkdir -p tmp/${target_bl_file%%.*}
+    echo "Copying tmp/${source_bl_file%%.*}/* to tmp/${target_bl_file%%.*}/"
+    cp -rf tmp/${source_bl_file%%.*}/* tmp/${target_bl_file%%.*}/
+    findlist=`ls -1 tmp/${source_bl_file%%.*}/ | grep -v / 2>/dev/null`
+    unzip -o "$ota_file" $findlist -d "tmp/${target_bl_file%%.*}"
+    unzip -j "$ota_file" NON-HLOS.bin.p -d "tmp/${target_bl_file%%.*}"
+    cd tmp/${target_bl_file%%.*} && patch_partition NON-HLOS.bin && cd ../../
+    [ ! -d "out" ] && mkdir out
+    echo "Compressing tmp/${target_bl_file%%.*} to out/${target_bl_file%.*}"
+    cd tmp/${target_bl_file%%.*} && compresslz4 $findlz4 && tar -H ustar -c `ls 2>/dev/null` > ../../out/${target_bl_file%.*} && cd ../../
+    echo "Generate md5 hash"
+    cd out && md5sum -t ${target_bl_file%.*} >> ${target_bl_file%.*} && mv ${target_bl_file%.*} $target_bl_file && cd ..
+  fi
+}
+
+cp_file(){
+  source_cp_file=`unzip -p $ota_file build_info.txt | grep source_cp_file | cut -d'=' -f 2`
+  target_cp_file=`unzip -p $ota_file build_info.txt | grep target_cp_file | cut -d'=' -f 2`
+  if [[ ! -f $source_cp_file ]]; then
+    pause 'exit' "$source_cp_file not found!, "
+    exit 1
+  else
+    echo "Extracting $source_cp_file to tmp/"
+    mkdir -p tmp/${source_cp_file%%.*}
+    tar -xf "$source_cp_file" -C tmp/${source_cp_file%%.*}
+    cd tmp/${source_cp_file%%.*} && findlz4=`ls *.lz4 2>/dev/null`
+    [[ ! -z "$findlz4" ]] && decompresslz4 $findlz4 && cd ../../
+    mkdir -p tmp/${target_cp_file%%.*}
+    echo "Copying tmp/${source_cp_file%%.*}/* to tmp/${target_cp_file%%.*}/"
+    cp -rf tmp/${source_cp_file%%.*}/* tmp/${target_cp_file%%.*}/
+    findlist=`ls -1 tmp/${source_cp_file%%.*}/ | grep -v / 2>/dev/null`
+    unzip -o "$ota_file" $findlist -d "tmp/${target_cp_file%%.*}"
+    unzip -j "$ota_file" modem.bin.p -d "tmp/${target_cp_file%%.*}"
+    cd tmp/${target_cp_file%%.*} && chmod 775 modem.bin && patch_partition modem.bin && cd ../../
+    [ ! -d "out" ] && mkdir out
+    echo "Compressing tmp/${target_cp_file%%.*} to out/${target_cp_file%.*}"
+    cd tmp/${target_cp_file%%.*} && compresslz4 $findlz4 && tar -H ustar -c `ls 2>/dev/null` > ../../out/${target_cp_file%.*} && cd ../../
+    echo "Generate md5 hash"
+    cd out && md5sum -t ${target_cp_file%.*} >> ${target_cp_file%.*} && mv ${target_cp_file%.*} $target_cp_file && cd ..
+  fi
+}
+
+csc_file(){
+  source_csc_file=`unzip -p $ota_file build_info.txt | grep source_csc_file | cut -d'=' -f 2`
+  target_csc_file=`unzip -p $ota_file build_info.txt | grep target_csc_file | cut -d'=' -f 2`
+  if [[ ! -f $source_csc_file ]]; then
+    pause 'exit' "$source_csc_file not found!, "
+    exit 1
+  else
+    echo "Extracting $source_csc_file to tmp/"
+    mkdir -p tmp/${source_csc_file%%.*}
+    tar -xf "$source_csc_file" -C tmp/${source_csc_file%%.*}
+    cd tmp/${source_csc_file%%.*} && findlz4=`ls *.lz4 2>/dev/null`
+    [[ ! -z "$findlz4" ]] && decompresslz4 $findlz4 && cd ../../
+    mkdir -p tmp/${target_csc_file%%.*}
+    echo "Copying tmp/${source_csc_file%%.*}/* to tmp/${target_csc_file%%.*}/"
+    cp -rf tmp/${source_csc_file%%.*}/* tmp/${target_csc_file%%.*}/
+    findlist=`ls -1 tmp/${source_csc_file%%.*}/ | grep -v / 2>/dev/null`
+    unzip -o "$ota_file" $findlist -d "tmp/${target_csc_file%%.*}"
+    csc_block_image_list="optics.img prism.img"
+    csc_block_image_extract_list="optics.new.dat optics.patch.dat optics.transfer.list prism.new.dat prism.patch.dat prism.transfer.list"
+    unzip -j "$ota_file" $csc_block_image_extract_list -d "tmp/${target_csc_file%%.*}"
+    cd tmp/${target_csc_file%%.*} && simg_2_img $csc_block_image_list && block_image_update $csc_block_image_list && cd ../../
+    [ ! -d "out" ] && mkdir out
+    echo "Compressing tmp/${target_csc_file%%.*} to out/${target_csc_file%.*}"
+    cd tmp/${target_csc_file%%.*} && compresslz4 $findlz4 && tar -H ustar -c `ls 2>/dev/null` > ../../out/${target_csc_file%.*} && cd ../../
+    echo "Generate md5 hash"
+    cd out && md5sum -t ${target_csc_file%.*} >> ${target_csc_file%.*} && mv ${target_csc_file%.*} $target_csc_file && cd ..
+  fi
+}
+
+compresslz4(){
+  for i in $@; do
+    j=${i%.*}
+    if [[ -f $j ]]; then
+      echo " - Found $j."
+      if `lz4 -B6 --content-size $j $i`; then
+        echo "${GREEN} - Compressing $j to $i ${STD}";
+        rm -rf $j
+      else
+        echo "${RED} - Not compressed $j ${STD}";
+      fi
+    fi
+  done
+  pause 'continue'
+}
+
+decompresslz4(){
+  for i in $@; do
+    if [[ -f $i ]]; then
+      echo " - Found $i."
+      j=${i%.*}
+      if `unlz4 $i $j`; then
+        echo "${GREEN} - Extracting $i to $j ${STD}";
+        rm -rf $i
+      else
+        echo "${RED} - Not extracted $i ${STD}";
+      fi
+    fi
+  done
+  pause 'continue'
+}
+
+applypatch(){
+  choose_ota_file
+  check_ota_file=`unzip -p $ota_file build_info.txt | grep source_ap_file | cut -d'=' -f 1`
+  if [[ ${check_ota_file} != source_ap_file ]]; then
+    pause 'return to Main menu' 'File is not OTA package!, '
+    exit 1
+    $DIR/menu
+  fi
+  echo "${GREEN}***** Start patching... *****${STD}"
+  [ -d "tmp" ] && rm -rf tmp
+  [ ! -d "tmp" ] && mkdir tmp
+  ap_file
+  bl_file
+  cp_file
+  csc_file
+  pause 'continue'
+  [ -d "tmp" ] && rm -rf tmp
+}
+
+clean(){
+  echo "${GREEN}***** Cleaning in Progress *****${STD}";
+  [ -d "tmp" ] && rm -rf tmp
+  [ -d "out" ] && rm -rf out
+  echo "${GREEN}***** Cleaning Done *****${STD}";
+  pause 'continue'
+}
+
+# Show menu
+show_menus(){
+  clear
+  echo "${ON_BLUE} O T A - P A T C H E R ${STD}"
+  echo "1. ${UNDER_LINE}A${STD}pplypatch"
+  echo "2. ${UNDER_LINE}C${STD}lean"
+  echo "3. E${UNDER_LINE}x${STD}it"
+}
+
+# Read input
+read_options(){
+  local choice=""
+  read -p "Enter choice [1-3]:" choice
+  case $choice in
+    "1"|"a"|"A") applypatch;;
+    "2"|"c"|"C") clean;;
+    "3"|"x"|"X") exit;;
+    *) pause 'return to Main menu' 'Invalid option, '
+  esac
+}
+
+# Trap CTRL+C, CTRL+Z and quit singles
+trap '' SIGINT SIGQUIT SIGTSTP
+ 
+# Step # Main logic - infinite loop
+while true
+do
+  show_menus
+  read_options
+done
