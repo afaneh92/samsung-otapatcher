@@ -56,8 +56,22 @@ patch_partition(){
 simg_2_img(){
   for i in $@; do
     if [[ -f $i ]]; then
-      echo "Extract sparse $i to raw image"
+      echo "Converting $i sparse to raw image"
       $DIR/bin/simg2img $1 $i-2 2>/dev/null
+      if [[ ! -s $i-2 ]]; then
+        rm -rf $i-2
+      else
+        mv $i-2 $i
+      fi
+    fi
+  done
+}
+
+img_2_simg(){
+  for i in $@; do
+    if [[ -f $i ]]; then
+      echo "Converting $i raw to sparse image"
+      img2simg $1 $i-2 2>/dev/null
       if [[ ! -s $i-2 ]]; then
         rm -rf $i-2
       else
@@ -103,7 +117,8 @@ lpmake_super(){
 block_image_update(){
   for i in $@; do
     j=${i%.*}
-    if $DIR/bin/BlockImageUpdate $i $j.transfer.list $j.new.dat $j.patch.dat; then
+    $DIR/bin/BlockImageUpdate $i $j.transfer.list $j.new.dat $j.patch.dat
+    if [[ ! -d cache ]]; then
       echo "${GREEN} - Patched $i ${STD}";
     else
       echo "${RED} - Failed to update $i ${STD}";
@@ -220,7 +235,7 @@ csc_file(){
     csc_block_image_list="optics.img prism.img"
     csc_block_image_extract_list="optics.new.dat optics.patch.dat optics.transfer.list prism.new.dat prism.patch.dat prism.transfer.list"
     unzip -j "$ota_file" $csc_block_image_extract_list -d "tmp/${target_csc_file%%.*}"
-    cd tmp/${target_csc_file%%.*} && simg_2_img $csc_block_image_list && block_image_update $csc_block_image_list && cd ../../
+    cd tmp/${target_csc_file%%.*} && simg_2_img $csc_block_image_list && block_image_update $csc_block_image_list && img_2_simg $csc_block_image_list && cd ../../
     [ ! -d "out" ] && mkdir out
     echo "Compressing tmp/${target_csc_file%%.*} to out/${target_csc_file%.*}"
     cd tmp/${target_csc_file%%.*} && compresslz4 $findlz4 && tar -H ustar -c `ls 2>/dev/null` > ../../out/${target_csc_file%.*} && cd ../../
