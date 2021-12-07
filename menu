@@ -28,9 +28,8 @@ choose_ota_file(){
     echo "$i) $e"
     i=i+1
   done
-  echo ""
   local file=""
-  read -p "Select: " file
+  read -p "Select ota file: " file
   if [[ $file -gt 0 && $file -le ${#find_ota_file[@]} ]]; then
     export ota_file="${find_ota_file[$file-1]}"
   else
@@ -40,16 +39,21 @@ choose_ota_file(){
 }
 
 patch_partition(){
-  check_patch_file=`unzip -p $DIR/$ota_file META-INF/com/google/android/updater-script | egrep -B 2 "$1.p"`
-  init_sha1=`echo $check_patch_file | cut -d ':' -f4 | cut -d '"' -f1`
-  target_size=`echo $check_patch_file | cut -d ':' -f6`
-  target_sha1=`echo $check_patch_file | cut -d ':' -f7 | cut -d '"' -f1`
-  if $DIR/bin/ApplyPatch $1 - $init_sha1 $target_size $target_sha1 $1.p; then
-    echo "${GREEN} - Patched $1 ${STD}";
-  else
-    echo "${RED} - Failed to apply patch to $1 ${STD}";
-  fi
-  rm -rf $1.p
+  for i in $@; do
+    if [[ -f $i.p ]]; then
+      check_patch_file=`unzip -p $DIR/$ota_file META-INF/com/google/android/updater-script | egrep -B 2 "$i.p"`
+      init_sha1=`echo $check_patch_file | cut -d ':' -f4 | cut -d '"' -f1`
+      target_size=`echo $check_patch_file | cut -d ':' -f6`
+      target_sha1=`echo $check_patch_file | cut -d ':' -f7 | cut -d '"' -f1`
+      $DIR/bin/ApplyPatch $i - $init_sha1 $target_size $target_sha1 $i.p
+      if [[ ! -d cache ]]; then
+        echo "${GREEN} - Patched $i ${STD}";
+      else
+        echo "${RED} - Failed to apply patch to $i ${STD}";
+      fi
+      rm -rf $i.p
+    fi
+  done
   pause 'continue'
 }
 
@@ -57,28 +61,28 @@ simg_2_img(){
   for i in $@; do
     if [[ -f $i ]]; then
       echo "Converting $i sparse to raw image"
-      $DIR/bin/simg2img $1 $i-2 2>/dev/null
-      if [[ ! -s $i-2 ]]; then
-        rm -rf $i-2
-      else
+      simg2img $i $i-2
+      if [[ -s $i-2 ]]; then
+        rm -rf $i
         mv $i-2 $i
       fi
     fi
   done
+  pause 'continue'
 }
 
 img_2_simg(){
   for i in $@; do
     if [[ -f $i ]]; then
       echo "Converting $i raw to sparse image"
-      img2simg $1 $i-2 2>/dev/null
-      if [[ ! -s $i-2 ]]; then
-        rm -rf $i-2
-      else
+      img2simg $i $i-2
+      if [[ -s $i-2 ]]; then
+        rm -rf $i
         mv $i-2 $i
       fi
     fi
   done
+  pause 'continue'
 }
 
 lpunpack_super(){
@@ -95,7 +99,7 @@ lpunpack_super(){
 }
 
 lpmake_super(){
-  if [[ -f system.img ]] && [[ -f vendor.img ]] && [[ -f product.img ]] && [[ -f odm.img ]]; then
+  if [[ -f super.img ]]; then
     echo "Generating a super partition image"
     super_size=`stat -c '%s' super.img`
     system_size=`stat -c '%s' system.img`
@@ -107,6 +111,7 @@ lpmake_super(){
       echo "${GREEN} - Generated super.img ${STD}";
       rm -rf super.img system.img vendor.img product.img odm.img
       mv super_new.img super.img
+      img_2_simg super.img
     else
       echo "${RED} - Failed to generate super.img ${STD}";
     fi
@@ -116,6 +121,7 @@ lpmake_super(){
 
 block_image_update(){
   for i in $@; do
+    echo "Patching block image $i"
     j=${i%.*}
     $DIR/bin/BlockImageUpdate $i $j.transfer.list $j.new.dat $j.patch.dat
     if [[ ! -d cache ]]; then
@@ -143,22 +149,27 @@ ap_file(){
     mkdir -p tmp/${target_ap_file%%.*}
     echo "Copying tmp/${source_ap_file%%.*}/* to tmp/${target_ap_file%%.*}/"
     cp -rf tmp/${source_ap_file%%.*}/* tmp/${target_ap_file%%.*}/
-    findlist=`ls -1 tmp/${source_ap_file%%.*}/ | grep -v / 2>/dev/null`
-    unzip -o "$ota_file" $findlist -d "tmp/${target_ap_file%%.*}"
-    unzip -j "$ota_file" boot.img.p -d "tmp/${target_ap_file%%.*}"
-    cd tmp/${target_ap_file%%.*} && patch_partition boot.img && cd ../../
     cd tmp/${target_ap_file%%.*} && lpunpack_super && cd ../../
-    ap_block_image_list="system.img vendor.img product.img odm.img"
-    ap_block_image_extract_list="system.new.dat system.patch.dat system.transfer.list vendor.new.dat vendor.patch.dat vendor.transfer.list product.new.dat product.patch.dat product.transfer.list odm.new.dat odm.patch.dat odm.transfer.list"
-    unzip -j "$ota_file" $ap_block_image_extract_list -d "tmp/${target_ap_file%%.*}"
-    cd tmp/${target_ap_file%%.*} && block_image_update $ap_block_image_list && cd ../../
+    ap_ext4_test=$(ls tmp/${target_ap_file%%.*}/*.img.ext4 2>/dev/null)
+    [[ ! -z "$ap_ext4_test" ]] && for x in $ap_ext4_test; do mv $x ${x%.*}; done
+    findlist=`ls -1 tmp/${target_ap_file%%.*}/ | grep -v / 2>/dev/null`
+    unzip -o "$ota_file" $findlist -d "tmp/${target_ap_file%%.*}"
+    for i in $findlist; do
+      j=${i%.*}
+      unzip -q "$ota_file" $i.p $j.new.dat $j.patch.dat $j.transfer.list -d "tmp/${target_ap_file%%.*}" 2>/dev/null
+    done
+    cd tmp/${target_ap_file%%.*} && patch_partition $findlist && cd ../../
+    cd tmp/${target_ap_file%%.*} && ap_block_image_list=`ls *.transfer.list | sed -e 's/\.transfer.list$/.img/' 2>/dev/null`
+    simg_2_img $ap_block_image_list && block_image_update $ap_block_image_list && img_2_simg $ap_block_image_list && cd ../../
     cd tmp/${target_ap_file%%.*} && lpmake_super && cd ../../
     [ ! -d "out" ] && mkdir out
+    [[ ! -z "$ap_ext4_test" ]] && for x in $ap_ext4_test; do mv ${x%.*} $x; done
     echo "Compressing tmp/${target_ap_file%%.*} to out/${target_ap_file%.*}"
     cd tmp/${target_ap_file%%.*} && compresslz4 $findlz4 && tar -H ustar -c `ls 2>/dev/null` > ../../out/${target_ap_file%.*} && cd ../../
     echo "Generate md5 hash"
     cd out && md5sum -t ${target_ap_file%.*} >> ${target_ap_file%.*} && mv ${target_ap_file%.*} $target_ap_file && cd ..
   fi
+  pause 'continue'
 }
 
 bl_file(){
@@ -178,14 +189,17 @@ bl_file(){
     cp -rf tmp/${source_bl_file%%.*}/* tmp/${target_bl_file%%.*}/
     findlist=`ls -1 tmp/${source_bl_file%%.*}/ | grep -v / 2>/dev/null`
     unzip -o "$ota_file" $findlist -d "tmp/${target_bl_file%%.*}"
-    unzip -j "$ota_file" NON-HLOS.bin.p -d "tmp/${target_bl_file%%.*}"
-    cd tmp/${target_bl_file%%.*} && patch_partition NON-HLOS.bin && cd ../../
+    for i in $findlist; do
+      unzip -q "$ota_file" $i.p -d "tmp/${target_bl_file%%.*}" 2>/dev/null
+    done
+    cd tmp/${target_bl_file%%.*} && patch_partition $findlist && cd ../../
     [ ! -d "out" ] && mkdir out
     echo "Compressing tmp/${target_bl_file%%.*} to out/${target_bl_file%.*}"
     cd tmp/${target_bl_file%%.*} && compresslz4 $findlz4 && tar -H ustar -c `ls 2>/dev/null` > ../../out/${target_bl_file%.*} && cd ../../
     echo "Generate md5 hash"
     cd out && md5sum -t ${target_bl_file%.*} >> ${target_bl_file%.*} && mv ${target_bl_file%.*} $target_bl_file && cd ..
   fi
+  pause 'continue'
 }
 
 cp_file(){
@@ -205,14 +219,17 @@ cp_file(){
     cp -rf tmp/${source_cp_file%%.*}/* tmp/${target_cp_file%%.*}/
     findlist=`ls -1 tmp/${source_cp_file%%.*}/ | grep -v / 2>/dev/null`
     unzip -o "$ota_file" $findlist -d "tmp/${target_cp_file%%.*}"
-    unzip -j "$ota_file" modem.bin.p -d "tmp/${target_cp_file%%.*}"
-    cd tmp/${target_cp_file%%.*} && chmod 775 modem.bin && patch_partition modem.bin && cd ../../
+    for i in $findlist; do
+      unzip -q "$ota_file" $i.p -d "tmp/${target_cp_file%%.*}" 2>/dev/null
+    done
+    cd tmp/${target_cp_file%%.*} && chmod 775 modem.bin && patch_partition $findlist && cd ../../
     [ ! -d "out" ] && mkdir out
     echo "Compressing tmp/${target_cp_file%%.*} to out/${target_cp_file%.*}"
     cd tmp/${target_cp_file%%.*} && compresslz4 $findlz4 && tar -H ustar -c `ls 2>/dev/null` > ../../out/${target_cp_file%.*} && cd ../../
     echo "Generate md5 hash"
     cd out && md5sum -t ${target_cp_file%.*} >> ${target_cp_file%.*} && mv ${target_cp_file%.*} $target_cp_file && cd ..
   fi
+  pause 'continue'
 }
 
 csc_file(){
@@ -230,18 +247,25 @@ csc_file(){
     mkdir -p tmp/${target_csc_file%%.*}
     echo "Copying tmp/${source_csc_file%%.*}/* to tmp/${target_csc_file%%.*}/"
     cp -rf tmp/${source_csc_file%%.*}/* tmp/${target_csc_file%%.*}/
-    findlist=`ls -1 tmp/${source_csc_file%%.*}/ | grep -v / 2>/dev/null`
+    csc_ext4_test=$(ls tmp/${target_csc_file%%.*}/*.img.ext4 2>/dev/null)
+    [[ ! -z "$csc_ext4_test" ]] && for x in $csc_ext4_test; do mv $x ${x%.*}; done
+    findlist=`ls -1 tmp/${target_csc_file%%.*}/ | grep -v / 2>/dev/null`
     unzip -o "$ota_file" $findlist -d "tmp/${target_csc_file%%.*}"
-    csc_block_image_list="optics.img prism.img"
-    csc_block_image_extract_list="optics.new.dat optics.patch.dat optics.transfer.list prism.new.dat prism.patch.dat prism.transfer.list"
-    unzip -j "$ota_file" $csc_block_image_extract_list -d "tmp/${target_csc_file%%.*}"
-    cd tmp/${target_csc_file%%.*} && simg_2_img $csc_block_image_list && block_image_update $csc_block_image_list && img_2_simg $csc_block_image_list && cd ../../
+    for i in $findlist; do
+      j=${i%.*}
+      unzip -q "$ota_file" $i.p $j.new.dat $j.patch.dat $j.transfer.list -d "tmp/${target_csc_file%%.*}" 2>/dev/null
+    done
+    cd tmp/${target_csc_file%%.*} && patch_partition $findlist && cd ../../
+    cd tmp/${target_csc_file%%.*} && csc_block_image_list=`ls *.transfer.list | sed -e 's/\.transfer.list$/.img/' 2>/dev/null`
+    simg_2_img $csc_block_image_list && block_image_update $csc_block_image_list && img_2_simg $csc_block_image_list && cd ../../
     [ ! -d "out" ] && mkdir out
+    [[ ! -z "$csc_ext4_test" ]] && for x in $csc_ext4_test; do mv ${x%.*} $x; done
     echo "Compressing tmp/${target_csc_file%%.*} to out/${target_csc_file%.*}"
     cd tmp/${target_csc_file%%.*} && compresslz4 $findlz4 && tar -H ustar -c `ls 2>/dev/null` > ../../out/${target_csc_file%.*} && cd ../../
     echo "Generate md5 hash"
     cd out && md5sum -t ${target_csc_file%.*} >> ${target_csc_file%.*} && mv ${target_csc_file%.*} $target_csc_file && cd ..
   fi
+  pause 'continue'
 }
 
 compresslz4(){
@@ -291,7 +315,6 @@ applypatch(){
   bl_file
   cp_file
   csc_file
-  pause 'continue'
   [ -d "tmp" ] && rm -rf tmp
 }
 
