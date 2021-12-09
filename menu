@@ -19,6 +19,13 @@ pause(){
   read -p "${RED}$2${STD}Press ${BLUE}[Enter]${STD} key to $1..." fackEnterKey
 }
 
+dependencies(){
+  dpkg -l "img2simg" &> /dev/null; [ $? = '1' ] && { echo "img2simg not installed, installing now."; sudo apt-get install img2simg; }
+  dpkg -l "simg2img" &> /dev/null; [ $? = '1' ] && { echo "simg2img not installed, installing now."; sudo apt-get install simg2img; }
+  dpkg -l "android-sdk-libsparse-utils" &> /dev/null; [ $? = '1' ] && { echo "android-sdk-libsparse-utils not installed, installing now."; sudo apt-get install android-sdk-libsparse-utils; }
+  dpkg -l "libssl1.0.0" &> /dev/null; [ $? = '1' ] && { echo "libssl1.0.0 not installed, installing now."; sudo apt-get install libssl1.0.0; }
+}
+
 choose_ota_file(){
   local find_ota_file=""
   find_ota_file=($(ls *.zip *.bin 2>/dev/null))
@@ -325,6 +332,8 @@ clean(){
   echo "${GREEN}***** Cleaning Done *****${STD}";
   pause 'continue'
 }
+
+dependencies
 
 # Show menu
 show_menus(){
