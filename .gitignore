@@ -1,4 +1,5 @@
 *.zip
+*.bin
 *.tar
 *.md5
 /tmp
